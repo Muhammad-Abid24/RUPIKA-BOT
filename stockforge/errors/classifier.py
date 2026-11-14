@@ -41,16 +41,16 @@ class ErrorClassifier:
 
     def classify(
         self,
-        http_status: Optional[int] = None,
+        http_status: Optional[int | Exception | NormalizedProviderError] = None,
         headers: Optional[Dict[str, str]] = None,
         body: Optional[Any] = None,
         request_id: Optional[str] = None,
         provider: Optional[str] = None,
         model: Optional[str] = None,
-        exception: Optional[Exception] = None,
+        exception: Optional[Exception | NormalizedProviderError] = None,
     ) -> NormalizedProviderError:
         """Classify HTTP status, response body, headers, or Python exception into NormalizedProviderError."""
-        if isinstance(http_status, Exception):
+        if isinstance(http_status, (Exception, NormalizedProviderError)):
             if exception is None:
                 exception = http_status
             http_status = None
@@ -122,13 +122,13 @@ default_classifier = ErrorClassifier()
 
 
 def classify_error(
-    http_status: Optional[int] = None,
+    http_status: Optional[int | Exception | NormalizedProviderError] = None,
     headers: Optional[Dict[str, str]] = None,
     body: Optional[Any] = None,
     request_id: Optional[str] = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
-    exception: Optional[Exception] = None,
+    exception: Optional[Exception | NormalizedProviderError] = None,
 ) -> NormalizedProviderError:
     """Convenience functional wrapper for error classification."""
     return default_classifier.classify(
