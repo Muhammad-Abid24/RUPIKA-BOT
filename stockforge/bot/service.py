@@ -69,11 +69,11 @@ class ResilientHTTPXRequest(HTTPXRequest):
     """
 
     async def do_request(self, *args: Any, **kwargs: Any) -> tuple[int, bytes]:
-        max_transient_retries = 5
+        max_transient_retries = 2
         for attempt in range(max_transient_retries):
             try:
                 return await super().do_request(*args, **kwargs)
-            except (NetworkError, TimedOut) as err:
+            except NetworkError as err:
                 err_str = str(err).lower()
                 is_transient = (
                     "remoteprotocolerror" in err_str
@@ -83,7 +83,6 @@ class ResilientHTTPXRequest(HTTPXRequest):
                     or "broken pipe" in err_str
                     or "handshake" in err_str
                     or "connect" in err_str
-                    or "timed out" in err_str
                 )
                 if is_transient and attempt < (max_transient_retries - 1):
                     logger.debug(
@@ -92,7 +91,7 @@ class ResilientHTTPXRequest(HTTPXRequest):
                         attempt + 1,
                         max_transient_retries,
                     )
-                    await asyncio.sleep(0.3 * (attempt + 1))
+                    await asyncio.sleep(0.1 * (attempt + 1))
                     continue
                 raise
         return await super().do_request(*args, **kwargs)
@@ -125,32 +124,32 @@ class BotService:
 
         main_request = ResilientHTTPXRequest(
             connection_pool_size=16,
-            connect_timeout=15.0,
-            read_timeout=30.0,
-            write_timeout=30.0,
-            pool_timeout=15.0,
+            connect_timeout=8.0,
+            read_timeout=20.0,
+            write_timeout=20.0,
+            pool_timeout=10.0,
             socket_options=sock_opts,
             httpx_kwargs={
                 "limits": httpx.Limits(
                     max_connections=16,
-                    max_keepalive_connections=4,
-                    keepalive_expiry=10.0,
+                    max_keepalive_connections=8,
+                    keepalive_expiry=60.0,
                 )
             },
         )
 
         get_updates_request = ResilientHTTPXRequest(
             connection_pool_size=1,
-            connect_timeout=15.0,
-            read_timeout=35.0,  # Must comfortably exceed polling timeout (10s) to avoid client drop triggering 409
-            write_timeout=15.0,
-            pool_timeout=15.0,
+            connect_timeout=5.0,
+            read_timeout=15.0,  # 15s comfortably exceeds polling timeout (10s)
+            write_timeout=5.0,
+            pool_timeout=5.0,
             socket_options=sock_opts,
             httpx_kwargs={
                 "limits": httpx.Limits(
                     max_connections=1,
-                    max_keepalive_connections=0,
-                    keepalive_expiry=5.0,
+                    max_keepalive_connections=1,
+                    keepalive_expiry=60.0,
                 )
             },
         )
@@ -389,7 +388,7 @@ class BotService:
         self,
         drop_pending_updates: bool = False,
         bootstrap_retries: int = -1,
-        poll_interval: float = 0.5,
+        poll_interval: float = 0.0,
         timeout: int = 10,
     ) -> None:
         """Start long polling with graceful shutdown on conflict."""

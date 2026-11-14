@@ -753,21 +753,21 @@ def get_review_service(
 
 
 def _generate_preview_jpeg_buffer(image_file: Path) -> Optional[io.BytesIO]:
-    """Generate high-quality downscaled JPEG buffer non-blockingly."""
+    """Generate high-quality downscaled JPEG buffer non-blockingly and efficiently."""
     try:
         with Image.open(image_file) as img:
             if img.mode != "RGB":
                 img = img.convert("RGB")
             orig_w, orig_h = img.size
-            max_preview = 1920
+            max_preview = 1600
             if max(orig_w, orig_h) > max_preview:
                 sc = max_preview / max(orig_w, orig_h)
                 nw = max(1, int(orig_w * sc))
                 nh = max(1, int(orig_h * sc))
-                img = img.resize((nw, nh), Image.Resampling.LANCZOS)
+                img = img.resize((nw, nh), Image.Resampling.BILINEAR)
             preview_bio = io.BytesIO()
             preview_bio.name = image_file.name
-            img.save(preview_bio, format="JPEG", quality=88, optimize=True)
+            img.save(preview_bio, format="JPEG", quality=85, optimize=False)
             preview_bio.seek(0)
             return preview_bio
     except Exception as prep_err:
@@ -845,6 +845,14 @@ async def review_command_handler(update: Update, context: ContextTypes.DEFAULT_T
         photo_sent = False
         image_file = Path(asset.raw_path) if asset.raw_path else None
         if image_file and image_file.is_file():
+            if update.effective_chat and context.bot:
+                try:
+                    await context.bot.send_chat_action(
+                        chat_id=update.effective_chat.id,
+                        action=ChatAction.UPLOAD_PHOTO,
+                    )
+                except Exception:
+                    pass
             # Prepare an optimized preview buffer for Telegram reply_photo non-blockingly
             preview_bio = await asyncio.to_thread(_generate_preview_jpeg_buffer, image_file)
 
@@ -922,6 +930,8 @@ async def review_command_handler(update: Update, context: ContextTypes.DEFAULT_T
                 )
             except Exception as doc_err:
                 logger.error("Gagal mengirim lampiran dokumen metadata .txt: %s", doc_err)
+
+        logger.info("review_command_handler selesai untuk Asset #%d", asset.id)
 
     except Exception as err:
         logger.error("Terjadi galat saat memproses review aset: %s", err, exc_info=True)
