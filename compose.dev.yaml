@@ -12,6 +12,7 @@ services:
       - ./deploy:/app/deploy:ro
       - stockforge_data:/data
       - ./config:/app/config:ro
+      - ./.env:/app/.env:ro
 
   worker:
     environment:
@@ -24,6 +25,7 @@ services:
       - ./deploy:/app/deploy:ro
       - stockforge_data:/data
       - ./config:/app/config:ro
+      - ./.env:/app/.env:ro
 
   scheduler:
     environment:
@@ -36,4 +38,5 @@ services:
       - ./deploy:/app/deploy:ro
       - stockforge_data:/data
       - ./config:/app/config:ro
+      - ./.env:/app/.env:ro
 

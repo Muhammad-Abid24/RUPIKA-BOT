@@ -110,6 +110,7 @@ class BotService:
         self.token = raw_token
         self.conflict_detected = False
         self.conflict_count = 0
+        self.consecutive_conflict_count = 0
         self._heartbeat_task: Optional[asyncio.Task] = None
 
     def build_application(self) -> Application:
@@ -124,9 +125,9 @@ class BotService:
 
         main_request = ResilientHTTPXRequest(
             connection_pool_size=16,
-            connect_timeout=8.0,
-            read_timeout=20.0,
-            write_timeout=20.0,
+            connect_timeout=10.0,
+            read_timeout=25.0,
+            write_timeout=25.0,
             pool_timeout=10.0,
             socket_options=sock_opts,
             httpx_kwargs={
@@ -140,10 +141,10 @@ class BotService:
 
         get_updates_request = ResilientHTTPXRequest(
             connection_pool_size=1,
-            connect_timeout=5.0,
-            read_timeout=15.0,  # 15s comfortably exceeds polling timeout (10s)
-            write_timeout=5.0,
-            pool_timeout=5.0,
+            connect_timeout=10.0,
+            read_timeout=25.0,  # 25s comfortably exceeds polling timeout (15s) by 10s
+            write_timeout=10.0,
+            pool_timeout=10.0,
             socket_options=sock_opts,
             httpx_kwargs={
                 "limits": httpx.Limits(
@@ -156,7 +157,10 @@ class BotService:
 
         async def _heartbeat_loop() -> None:
             while True:
-                touch_bot_heartbeat("healthy")
+                if self.consecutive_conflict_count < 3:
+                    touch_bot_heartbeat("healthy")
+                else:
+                    touch_bot_heartbeat("conflict", {"count": self.consecutive_conflict_count})
                 await asyncio.sleep(5)
 
         async def _on_post_init(application: Application) -> None:
@@ -209,6 +213,7 @@ class BotService:
             )
 
             # If an update is successfully received, ensure reconnect state is published if previously severed
+            self.consecutive_conflict_count = 0
             if gateway_alerts.tg_disconnected:
                 gateway_alerts.on_telegram_reconnected()
 
@@ -336,22 +341,18 @@ class BotService:
             if isinstance(err, Conflict) or "conflict" in err_str:
                 self.conflict_detected = True
                 self.conflict_count += 1
-                touch_bot_heartbeat("conflict", {"count": self.conflict_count})
-                gateway_alerts.on_telegram_disconnected("Konflik sesi polling Telegram aktif (HTTP 409 Conflict)")
-                logger.critical(
-                    "Konflik polling Telegram terdeteksi (HTTP 409 Conflict): "
-                    "instance bot lain sedang aktif. Menyegarkan koneksi polling..."
+                self.consecutive_conflict_count += 1
+                logger.warning(
+                    "Telegram melaporkan HTTP 409 Conflict (insiden #%d, berturut-turut #%d). "
+                    "Menunggu jeda polling otomatis agar sesi lama Telegram dibersihkan...",
+                    self.conflict_count,
+                    self.consecutive_conflict_count,
                 )
-                if context.application and context.application.updater:
-                    try:
-                        await context.application.updater.stop()
-                    except Exception:
-                        pass
-                if context.application:
-                    try:
-                        await context.application.stop()
-                    except Exception:
-                        pass
+                if self.consecutive_conflict_count >= 3:
+                    touch_bot_heartbeat("conflict", {"count": self.conflict_count})
+                    gateway_alerts.on_telegram_disconnected(
+                        f"Konflik sesi polling Telegram aktif berulang (HTTP 409 Conflict, insiden #{self.conflict_count})"
+                    )
             elif (
                 isinstance(err, (TimedOut, NetworkError))
                 or "timed out" in err_str
@@ -388,8 +389,8 @@ class BotService:
         self,
         drop_pending_updates: bool = False,
         bootstrap_retries: int = -1,
-        poll_interval: float = 0.0,
-        timeout: int = 10,
+        poll_interval: float = 0.5,
+        timeout: int = 15,
     ) -> None:
         """Start long polling with graceful shutdown on conflict."""
         app = self.build_application()
