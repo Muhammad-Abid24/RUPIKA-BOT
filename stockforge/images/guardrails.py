@@ -80,6 +80,48 @@ COMMERCIAL_SAFETY_SUFFIX = (
     "no logos, no text, no watermarks, no trademarks, no copyrighted characters"
 )
 
+# Human subject keywords to detect human anatomy requirements
+HUMAN_SUBJECT_KEYWORDS: set[str] = {
+    "human", "person", "people", "man", "woman", "men", "women", "girl", "boy",
+    "child", "children", "baby", "worker", "employee", "entrepreneur", "doctor",
+    "nurse", "engineer", "chef", "hand", "hands", "finger", "fingers", "holding",
+    "touching", "typing", "portrait", "face", "faces", "model", "artisan", "technician",
+    "customer", "crowd", "team", "leader", "athlete", "driver", "student", "teacher",
+    "scientist", "patient", "craftsman", "waiter", "waitress", "barista", "programmer",
+    "developer", "designer", "architect", "businessperson", "professional", "pedestrian",
+    "baker", "artist", "mechanic", "carpenter", "surgeon", "consultant", "creator",
+}
+
+# Strict hand and finger count guardrail for human generation
+HUMAN_ANATOMY_GUARDRAIL = (
+    ", anatomically correct human anatomy, perfectly formed realistic hands, "
+    "exactly 5 distinct fingers per visible hand (10 fingers for two hands, 5 fingers for one hand), "
+    "clearly defined individual fingers, natural joints, no extra fingers, no missing fingers, "
+    "no fused digits, no polydactyly, photorealistic hands and fingers"
+)
+
+
+def is_human_subject_prompt(prompt: str) -> bool:
+    """Determine whether an image generation prompt depicts human subjects or visible hands."""
+    if not prompt:
+        return False
+    p_lower = prompt.lower()
+    for kw in HUMAN_SUBJECT_KEYWORDS:
+        # Match singular and plural/derivative forms (e.g., engineer/engineers, worker/workers)
+        pattern = rf"\b{re.escape(kw)}(?:s|es|ren)?\b"
+        if re.search(pattern, p_lower):
+            return True
+    return False
+
+
+def enforce_human_anatomy_guardrail(prompt: str) -> str:
+    """Append strict hand and finger count guardrails if the prompt involves human subjects."""
+    if not prompt:
+        return prompt
+    if is_human_subject_prompt(prompt) and "5 distinct fingers per visible hand" not in prompt:
+        return f"{prompt.rstrip('. ')}{HUMAN_ANATOMY_GUARDRAIL}"
+    return prompt
+
 
 def validate_prompt_anti_plagiarism(prompt: str) -> Tuple[bool, List[str]]:
     """Validate that prompt does not contain prohibited brands, characters, or artist mimicry.
@@ -147,6 +189,9 @@ def sanitize_and_enforce_plagiarism_free_prompt(prompt: str) -> str:
     # 5. Enforce commercial stock safety suffix if not already present
     if "100% original composition" not in cleaned:
         cleaned = f"{cleaned}{COMMERCIAL_SAFETY_SUFFIX}"
+
+    # 6. Enforce human anatomy guardrails (hands & finger count rule) if human subjects detected
+    cleaned = enforce_human_anatomy_guardrail(cleaned)
 
     logger.debug("Prompt sanitized for commercial anti-plagiarism compliance: %s", cleaned[:80])
     return cleaned

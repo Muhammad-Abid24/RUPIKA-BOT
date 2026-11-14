@@ -173,13 +173,13 @@ class ReviewService:
 
         enhancements: List[str] = []
         if has_hand_finger_issue:
-            enhancements.append("perfect anatomically correct hands with exactly 5 distinct fingers, natural finger articulation and structure, no extra digits, no fused fingers")
+            enhancements.append("perfect anatomically correct hands with exactly 5 distinct fingers per visible hand (10 fingers for two hands, 5 fingers for one hand), natural finger articulation and joints, no extra fingers, no missing digits, no fused digits")
         if has_face_issue:
             enhancements.append("realistic symmetrical facial features, coherent eye pupils and gaze, natural realistic skin texture")
         if has_interaction_issue:
             enhancements.append("clear crisp physical contact boundaries, natural physical interaction without clipping or melting overlap")
         elif has_anatomy_issue:
-            enhancements.append("anatomically correct human anatomy, natural realistic proportions")
+            enhancements.append("anatomically correct human anatomy, perfectly proportioned hands with 5 fingers per hand, natural realistic proportions")
 
         if has_blur_issue:
             enhancements.append("razor-sharp focus, professional commercial photography, 8k resolution, crisp clean details")
@@ -187,7 +187,7 @@ class ReviewService:
             enhancements.append("clean background without any logos, trademarks, text overlays, or watermarks")
 
         if not enhancements:
-            enhancements.append("perfect anatomically correct hands with 5 fingers, realistic facial features, sharp focus, professional commercial stock photography")
+            enhancements.append("perfect anatomically correct hands with exactly 5 fingers per hand, realistic facial features, sharp focus, professional commercial stock photography")
 
         improved = f"{base_prompt.rstrip('. ')}, {', '.join(enhancements)}"
         return improved
@@ -442,8 +442,8 @@ class ReviewService:
                     vision_checked_at = det.get("checked_at", str(qc.checked_at) if qc.checked_at else "-")
                     anat = det.get("anatomy", {})
                     anat_findings = []
-                    if anat.get("hands_and_fingers_defect"):
-                        anat_findings.append("Cacat Jari/Tangan")
+                    if anat.get("hands_and_fingers_defect") or anat.get("fingers_per_hand_correct") is False:
+                        anat_findings.append("Cacat Jari/Tangan (tidak sesuai 5 jari per tangan)")
                     if anat.get("face_defect"):
                         anat_findings.append("Cacat Wajah/Mata")
                     if anat.get("interaction_defect"):

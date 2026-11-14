@@ -331,8 +331,12 @@ class VisionQcService:
         prompt = (
             "You are a rigorous commercial stock photography Quality Control (QC) inspector. "
             "Inspect this image with extreme scrutiny across these mandatory inspection pillars:\n"
-            "1. ANATOMY & HUMAN SUBJECTS (HIGHEST PRIORITY):\n"
-            "   - Hands & Fingers: Count the exact number of fingers on each visible hand. Every visible hand MUST have exactly 5 distinct, well-defined fingers. Flag any extra fingers (polydactyly), missing fingers, fused/webbed digits, unnatural joints, floating thumbs, or claw-like distortions.\n"
+            "1. ANATOMY & HUMAN SUBJECTS (HIGHEST PRIORITY - STRICT ZERO TOLERANCE):\n"
+            "   - Hands & Fingers Count Rule: Count the exact number of visible hands and fingers.\n"
+            "     * Each visible hand MUST have EXACTLY 5 distinct, well-defined fingers (including thumb).\n"
+            "     * If 2 hands are visible, there MUST be exactly 10 fingers total (5 fingers on left hand, 5 fingers on right hand).\n"
+            "     * If 1 hand is visible, there MUST be exactly 5 fingers.\n"
+            "     * Strictly flag ANY polydactyly (6+ fingers), missing fingers (< 5 fingers), fused/webbed digits, extra thumbs, malformed joints, or claw-like hands as a fatal defect.\n"
             "   - Hand Shape & Posture: Check for unnatural wrist bends, impossible finger contortions, or melting hand geometry.\n"
             "   - Facial Coherence: Check for facial symmetry, coherent eye pupils and gaze, natural eyelids, realistic teeth, and natural mouth/nose structure. Flag any asymmetric melting eyes, uncanny valley artifacts, extra teeth, or warped features.\n"
             "   - Human Interactions & Contact Boundaries: Check all points where hands touch objects (holding cups, tools, plants, phones, food, etc.) or touch other people. Flag any fingers disappearing into objects, objects melting into skin, overlapping hands blending into each other, or clipping geometry.\n"
@@ -341,7 +345,7 @@ class VisionQcService:
             "3. TECHNICAL DEFECTS:\n"
             "   - Check for severe blur, pixelation, severe noise, unnatural AI artifacts, or floating disjointed objects.\n\n"
             "CRITICAL FAIL-CLOSED RULE:\n"
-            "If ANY anatomical defect (hand/finger count, distorted face, flawed interaction boundary), trademark/logo, watermark, or significant technical defect is present, "
+            "If ANY anatomical defect (especially hand or finger count mismatch: not 5 fingers per hand / not 10 fingers for 2 hands), trademark/logo, watermark, or significant technical defect is present, "
             "you MUST mark 'passed': false, list the specific issues in 'issues', provide an anatomy breakdown, and explain in 'notes'.\n\n"
             "Return valid JSON in this exact structure:\n"
             "{\n"
@@ -349,6 +353,8 @@ class VisionQcService:
             "  \"confidence\": float (0.0 to 1.0),\n"
             "  \"anatomy\": {\n"
             "    \"has_humans\": bool,\n"
+            "    \"visible_hands_count\": int,\n"
+            "    \"fingers_per_hand_correct\": bool,\n"
             "    \"hands_and_fingers_defect\": bool,\n"
             "    \"face_defect\": bool,\n"
             "    \"interaction_defect\": bool,\n"
@@ -379,18 +385,28 @@ class VisionQcService:
                 anatomy_dict = {"details": str(anatomy_dict)}
 
             # Strict anatomy detection guardrails (Fail-Closed)
+            hands_count = int(anatomy_dict.get("visible_hands_count") or 0)
+            fingers_ok = anatomy_dict.get("fingers_per_hand_correct")
+
+            has_finger_count_defect = (
+                hands_count > 0 and fingers_ok is False
+            )
             has_anatomy_defect = (
                 bool(anatomy_dict.get("hands_and_fingers_defect"))
                 or bool(anatomy_dict.get("face_defect"))
                 or bool(anatomy_dict.get("interaction_defect"))
+                or has_finger_count_defect
             )
 
             # Also check textual mentions of anatomical defects in issues or notes
             combined_text = ("; ".join(str(i) for i in issues) + " " + notes).lower()
             anatomy_defect_keywords = [
                 "polydactyly", "extra finger", "missing finger", "6 fingers", "six fingers", "4 fingers", "four fingers",
-                "fused finger", "webbed finger", "distorted hand", "distorted face", "melting finger", "clipping hand",
-                "anatomical distortion", "deformed hand", "deformed finger"
+                "7 fingers", "seven fingers", "3 fingers", "three fingers", "more than 5 fingers", "less than 5 fingers",
+                "not 5 fingers", "not 10 fingers", "finger count", "fused finger", "webbed finger", "distorted hand",
+                "distorted face", "melting finger", "clipping hand", "anatomical distortion", "deformed hand",
+                "deformed finger", "bad hands", "cacat jari", "jari berlebih", "jari kurang", "jari tidak wajar",
+                "cacat tangan"
             ]
             for kw in anatomy_defect_keywords:
                 if kw in combined_text:
@@ -400,7 +416,7 @@ class VisionQcService:
 
             if has_anatomy_defect:
                 passed = False
-                if anatomy_dict.get("hands_and_fingers_defect") and "anatomical_defect_hands_or_fingers" not in issues:
+                if (anatomy_dict.get("hands_and_fingers_defect") or has_finger_count_defect) and "anatomical_defect_hands_or_fingers" not in issues:
                     issues.append("anatomical_defect_hands_or_fingers")
                 if anatomy_dict.get("face_defect") and "anatomical_defect_face" not in issues:
                     issues.append("anatomical_defect_face")
