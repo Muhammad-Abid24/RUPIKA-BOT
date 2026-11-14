@@ -938,12 +938,6 @@ async def review_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     if not query or not query.data:
         return
 
-    # Acknowledge callback immediately
-    try:
-        await query.answer()
-    except Exception:
-        pass
-
     raw_data = query.data
     # Format: rev:<action>:<asset_id>:<token>
     parts = raw_data.split(":")
@@ -954,6 +948,24 @@ async def review_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     if not asset_id_str.isdigit():
         return
     asset_id = int(asset_id_str)
+
+    # Immediately acknowledge callback and send typing indicator for action
+    chat = update.effective_chat
+    if action == "reg":
+        if chat and context.bot:
+            try:
+                await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+            except Exception:
+                pass
+        try:
+            await query.answer("🔄 Memulai proses regenerasi gambar...", show_alert=False)
+        except Exception:
+            pass
+    else:
+        try:
+            await query.answer()
+        except Exception:
+            pass
 
     service = get_review_service()
 
@@ -1054,23 +1066,26 @@ async def review_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     # Kirim konfirmasi detail jika regenerasi berhasil di-enqueue
     if res.decision == "regenerate" and res.new_job_id:
+        if chat and context.bot:
+            try:
+                await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+            except Exception:
+                pass
+        from stockforge.providers.pricing import get_active_image_model, resolve_image_unit_cost_usd
+        active_model = get_active_image_model()
+        cost_usd = resolve_image_unit_cost_usd(active_model)
         try:
             regen_text = (
                 f"🔄 <b>Proses Regenerasi Dimulai untuk Aset #{asset_id}</b>\n\n"
                 f"• <b>Job Baru:</b> Batch #{res.new_job_id}\n"
-                f"• <b>Status:</b> Antrean produksi gambar baru\n\n"
+                f"• <b>Model:</b> <code>{html.escape(active_model)}</code>\n"
+                f"• <b>Estimasi Biaya:</b> <code>${cost_usd:.3f} USD</code>\n"
+                f"• <b>Status:</b> Antrean produksi gambar baru (sedang diproses)...\n\n"
                 f"💡 <i>Gunakan perintah <code>/status {res.new_job_id}</code> untuk memantau kemajuan atau tunggu notifikasi saat gambar selesai dibuat.</i>"
             )
             await msg.reply_text(regen_text, parse_mode=ParseMode.HTML)
         except Exception as rx:
             logger.warning("Gagal mengirim pesan konfirmasi regenerasi: %s", rx)
-
-    ans_msg = (
-        f"Regenerasi Aset #{asset_id} dimulai (Batch #{res.new_job_id})!"
-        if (res.decision == "regenerate" and res.new_job_id)
-        else f"Aset #{asset_id} berhasil di-{res.decision}!"
-    )
-    await query.answer(ans_msg, show_alert=False)
 
 
 def cleanup_rejected_assets(session_factory: Callable[[], Session]) -> dict[str, int]:

@@ -391,7 +391,7 @@ async def research_callback_handler(
 
         from stockforge.providers.pricing import estimate_production_cost
 
-        cost_cents, cost_usd, model_name = estimate_production_cost(image_count)
+        cost_cents, cost_usd, model_name, formatted_cost_usd = estimate_production_cost(image_count)
 
         # Create immutable production plan
         plan = planner.create_plan(
@@ -411,7 +411,7 @@ async def research_callback_handler(
             f"• <b>Niche Terpilih:</b> {html.escape(', '.join(selected_niches))}\n"
             f"• <b>Jumlah Aset:</b> <code>{image_count} gambar</code>\n"
             f"• <b>Rute Model:</b> <code>{html.escape(model_name)}</code>\n"
-            f"• <b>Estimasi Biaya Maksimum:</b> <code>${cost_usd:.2f} USD</code>\n"
+            f"• <b>Estimasi Biaya Maksimum:</b> <code>${formatted_cost_usd} USD</code>\n"
             f"• <b>Lisensi Komersial:</b> Terverifikasi hak redistribusi stok\n"
             f"• <b>Masa Berlaku Otorisasi:</b> 24 jam (sampai {plan.expires_at.strftime('%Y-%m-%d %H:%M UTC')})\n"
             f"• <b>Hash Integritas:</b> <code>{hash_short}</code>\n\n"
@@ -421,7 +421,7 @@ async def research_callback_handler(
         keyboard = [
             [
                 InlineKeyboardButton(
-                    f"✅ Setujui Produksi (${cost_usd:.2f} USD)",
+                    f"✅ Setujui Produksi (${formatted_cost_usd} USD)",
                     callback_data=f"rsh:appr:{plan.id}:{hash_short}",
                 )
             ],

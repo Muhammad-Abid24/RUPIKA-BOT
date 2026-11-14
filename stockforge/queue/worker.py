@@ -152,6 +152,7 @@ class Worker:
 
         if not created_asset_id:
             # Generate single image
+            self._send_telegram_typing_action()
             batch_res = asyncio.run(image_service.generate_batch(prompts=[prompt], max_batch_size=1, job_id=job_id))
             if batch_res.failure_count > 0:
                 err_msg = batch_res.failed_items[0].get("error", "Generasi gambar gagal")
@@ -168,6 +169,7 @@ class Worker:
 
             # Run deterministic QC automatically
             try:
+                self._send_telegram_typing_action()
                 from stockforge.qc.deterministic import DeterministicQcService
                 qc_svc = DeterministicQcService(session_factory=lambda: Session(self.queue_service.engine))
                 qc_svc.inspect_asset(created_asset_id)
@@ -178,6 +180,7 @@ class Worker:
             if router:
                 tracker.update_item_stage(job_id, item_index, stage="metadata", status="processing", asset_id=created_asset_id)
                 self._publish_progress(job_id, force=True)
+                self._send_telegram_typing_action()
                 try:
                     from stockforge.qc.vision import VisionQcService
                     vision_svc = VisionQcService(
@@ -235,6 +238,23 @@ class Worker:
                 logger.warning("Ekspepsi tak terduga memanggil Telegram %s: %s", method, ex)
                 return None
         return None
+
+    def _send_telegram_typing_action(self) -> None:
+        """Send chat action 'typing' to admin Telegram chat."""
+        try:
+            from stockforge.config import get_settings
+            settings = get_settings()
+            token = settings.telegram_bot_token.get_secret_value() if settings.telegram_bot_token else None
+            admin_ids = settings.admin_ids_list
+            if token and admin_ids:
+                self._post_telegram(
+                    token=token,
+                    method="sendChatAction",
+                    payload={"chat_id": admin_ids[0], "action": "typing"},
+                    timeout_secs=4.0,
+                )
+        except Exception as e:
+            logger.debug("Tidak dapat mengirim typing action dari worker: %s", e)
 
     def _send_telegram_failure_alert(
         self,
@@ -473,6 +493,7 @@ class Worker:
             # Persist stage update BEFORE external execution
             tracker.update_item_stage(job_id, idx, stage="generating", status="processing")
             self._publish_progress(job_id, force=True)
+            self._send_telegram_typing_action()
 
             try:
                 # Network / processing happens outside database transaction!
