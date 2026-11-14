@@ -24,6 +24,12 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 
 from stockforge.bot.alerts import gateway_alerts
+from stockforge.bot.lifecycle import (
+    BotProcessLock,
+    remove_bot_heartbeat,
+    safe_answer_callback,
+    touch_bot_heartbeat,
+)
 from stockforge.bot.handlers import (
     health_handler,
     help_handler,
@@ -105,6 +111,7 @@ class BotService:
         self.token = raw_token
         self.conflict_detected = False
         self.conflict_count = 0
+        self._heartbeat_task: Optional[asyncio.Task] = None
 
     def build_application(self) -> Application:
         """Configure Application with handlers and conflict-aware error handling."""
@@ -148,15 +155,27 @@ class BotService:
             },
         )
 
+        async def _heartbeat_loop() -> None:
+            while True:
+                touch_bot_heartbeat("healthy")
+                await asyncio.sleep(5)
+
         async def _on_post_init(application: Application) -> None:
             gateway_alerts.on_telegram_reconnected()
+            touch_bot_heartbeat("healthy")
+            self._heartbeat_task = asyncio.create_task(_heartbeat_loop())
             try:
                 from stockforge.bot.review import cleanup_rejected_assets
-                res = cleanup_rejected_assets(get_sf())
+                res = await asyncio.to_thread(cleanup_rejected_assets, get_sf())
                 if res.get("files_deleted", 0) > 0 or res.get("cleaned_assets", 0) > 0:
                     logger.info("Pembersihan aset rejected saat startup: %s", res)
             except Exception as cl_err:
                 logger.warning("Gagal membersihkan aset rejected saat startup: %s", cl_err)
+
+        async def _on_post_shutdown(application: Application) -> None:
+            if self._heartbeat_task and not self._heartbeat_task.done():
+                self._heartbeat_task.cancel()
+            touch_bot_heartbeat("stopped")
 
         app = (
             ApplicationBuilder()
@@ -164,6 +183,7 @@ class BotService:
             .defaults(Defaults(block=False))
             .concurrent_updates(True)
             .post_init(_on_post_init)
+            .post_shutdown(_on_post_shutdown)
             .request(main_request)
             .get_updates_request(get_updates_request)
             .build()
@@ -316,6 +336,8 @@ class BotService:
             err_str = str(err).lower() if err else ""
             if isinstance(err, Conflict) or "conflict" in err_str:
                 self.conflict_detected = True
+                self.conflict_count += 1
+                touch_bot_heartbeat("conflict", {"count": self.conflict_count})
                 gateway_alerts.on_telegram_disconnected("Konflik sesi polling Telegram aktif (HTTP 409 Conflict)")
                 logger.critical(
                     "Konflik polling Telegram terdeteksi (HTTP 409 Conflict): "
@@ -392,51 +414,82 @@ def start_bot(
     token: Optional[str] = None,
     drop_pending_updates: bool = False,
 ) -> None:
-    """Entry point to launch the bot service with continuous resilience and auto-restart."""
+    """Entry point to launch the bot service with continuous resilience, single-instance lock, and auto-restart."""
+    import random
     import time
 
-    attempt = 0
-    while True:
-        loop = None
-        try:
-            # Ensure a fresh, non-closed asyncio event loop is active for this thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+    lock = BotProcessLock()
+    if not lock.acquire():
+        logger.critical(
+            "Bot process lock tidak dapat diperoleh. "
+            "Instance bot lain sedang berjalan aktif. Menolak startup polling ganda untuk mencegah 409 Conflict."
+        )
+        return
 
-            service = BotService(token=token)
-            service.run_polling(drop_pending_updates=drop_pending_updates)
-            if service.conflict_detected:
-                gateway_alerts.on_telegram_disconnected("Konflik sesi polling Telegram aktif (HTTP 409 Conflict)")
-                logger.warning("Bot mendeteksi konflik polling 409. Istirahat 10 detik agar koneksi lama Telegram kedaluwarsa...")
-                time.sleep(10)
-                continue
-            logger.info("Polling Telegram selesai secara normal. Menyambung kembali polling dalam 1 detik...")
-            time.sleep(1)
-        except (TimedOut, NetworkError, OSError) as net_err:
-            attempt += 1
-            delay = min(2 ** attempt, 15)
-            gateway_alerts.on_telegram_disconnected(f"Gangguan jaringan ke server Telegram ({net_err})")
-            logger.warning(
-                "Koneksi polling Telegram terganggu (%s). Menyambung kembali dalam %d detik (percobaan #%d)...",
-                net_err,
-                delay,
-                attempt,
-            )
-            time.sleep(delay)
-        except Exception as ex:
-            if "conflict" in str(ex).lower():
-                gateway_alerts.on_telegram_disconnected(f"Konflik sesi polling Telegram ({ex})")
-                logger.warning("Konflik 409 terdeteksi saat startup: %s. Menunggu 10 detik sebelum re-polling...", ex)
-                time.sleep(10)
-                continue
-            gateway_alerts.on_telegram_disconnected(f"Galat bot ({ex})")
-            logger.error("Galat tak terduga pada bot service: %s. Memulai ulang dalam 3 detik...", ex, exc_info=True)
-            time.sleep(3)
-        finally:
-            if loop is not None:
-                try:
-                    if not loop.is_closed():
-                        loop.close()
-                except Exception:
-                    pass
+    attempt = 0
+    conflict_count = 0
+    try:
+        while True:
+            loop = None
+            try:
+                # Ensure a fresh, non-closed asyncio event loop is active for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                service = BotService(token=token)
+                service.run_polling(drop_pending_updates=drop_pending_updates)
+                if service.conflict_detected:
+                    conflict_count += 1
+                    delay = min(60.0, 5.0 * (2 ** min(conflict_count - 1, 4))) + random.uniform(0.5, 3.0)
+                    gateway_alerts.on_telegram_disconnected(
+                        f"Konflik sesi polling Telegram aktif (HTTP 409 Conflict, insiden #{conflict_count})"
+                    )
+                    logger.warning(
+                        "Bot mendeteksi konflik polling 409 (insiden #%d). Jeda %.1f detik agar sesi lama Telegram kedaluwarsa...",
+                        conflict_count,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+
+                conflict_count = 0
+                attempt = 0
+                logger.info("Polling Telegram selesai secara normal. Menyambung kembali polling dalam 1 detik...")
+                time.sleep(1)
+            except (TimedOut, NetworkError, OSError) as net_err:
+                attempt += 1
+                delay = min(2 ** attempt, 15)
+                gateway_alerts.on_telegram_disconnected(f"Gangguan jaringan ke server Telegram ({net_err})")
+                logger.warning(
+                    "Koneksi polling Telegram terganggu (%s). Menyambung kembali dalam %d detik (percobaan #%d)...",
+                    net_err,
+                    delay,
+                    attempt,
+                )
+                time.sleep(delay)
+            except Exception as ex:
+                if "conflict" in str(ex).lower():
+                    conflict_count += 1
+                    delay = min(60.0, 5.0 * (2 ** min(conflict_count - 1, 4))) + random.uniform(0.5, 3.0)
+                    gateway_alerts.on_telegram_disconnected(f"Konflik sesi polling Telegram ({ex})")
+                    logger.warning(
+                        "Konflik 409 terdeteksi saat startup: %s. Menunggu %.1f detik sebelum re-polling...",
+                        ex,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                gateway_alerts.on_telegram_disconnected(f"Galat bot ({ex})")
+                logger.error("Galat tak terduga pada bot service: %s. Memulai ulang dalam 3 detik...", ex, exc_info=True)
+                time.sleep(3)
+            finally:
+                if loop is not None:
+                    try:
+                        if not loop.is_closed():
+                            loop.close()
+                    except Exception:
+                        pass
+    finally:
+        remove_bot_heartbeat()
+        lock.release()
 

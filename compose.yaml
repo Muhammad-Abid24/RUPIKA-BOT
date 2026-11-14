@@ -29,11 +29,11 @@ services:
     networks:
       - rupika_internal
     healthcheck:
-      test: ["CMD", "rupika", "doctor"]
+      test: ["CMD", "rupika", "health", "--service", "bot"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
   worker:
     build:
@@ -65,11 +65,11 @@ services:
       bot:
         condition: service_started
     healthcheck:
-      test: ["CMD", "rupika", "doctor"]
+      test: ["CMD", "rupika", "health", "--service", "worker"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
   scheduler:
     profiles:

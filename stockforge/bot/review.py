@@ -1,6 +1,7 @@
 """Telegram visual review and human approval workflow (SF-011)."""
 from __future__ import annotations
 
+import asyncio
 import html
 import io
 import json
@@ -17,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from stockforge.bot.auth import require_admin
+from stockforge.bot.lifecycle import safe_answer_callback
 from stockforge.db.models import Asset, AssetMetadata, Job, QcResult, Review, TelegramUser, utc_now
 from stockforge.qc.vision import ADOBE_CATEGORIES, VISION_QC_DISCLAIMER
 
@@ -750,6 +752,29 @@ def get_review_service(
     return _default_review_service
 
 
+def _generate_preview_jpeg_buffer(image_file: Path) -> Optional[io.BytesIO]:
+    """Generate high-quality downscaled JPEG buffer non-blockingly."""
+    try:
+        with Image.open(image_file) as img:
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            orig_w, orig_h = img.size
+            max_preview = 1920
+            if max(orig_w, orig_h) > max_preview:
+                sc = max_preview / max(orig_w, orig_h)
+                nw = max(1, int(orig_w * sc))
+                nh = max(1, int(orig_h * sc))
+                img = img.resize((nw, nh), Image.Resampling.LANCZOS)
+            preview_bio = io.BytesIO()
+            preview_bio.name = image_file.name
+            img.save(preview_bio, format="JPEG", quality=88, optimize=True)
+            preview_bio.seek(0)
+            return preview_bio
+    except Exception as prep_err:
+        logger.warning("Gagal membuat preview buffer gambar untuk review: %s", prep_err)
+        return None
+
+
 @require_admin
 async def review_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /review command providing interactive visual review wizard."""
@@ -820,27 +845,8 @@ async def review_command_handler(update: Update, context: ContextTypes.DEFAULT_T
         photo_sent = False
         image_file = Path(asset.raw_path) if asset.raw_path else None
         if image_file and image_file.is_file():
-            # Prepare an optimized preview buffer for Telegram reply_photo (max 1920px, ~200-400KB JPEG)
-            # This ensures instant upload without timeouts or Telegram client render lag, while leaving the master 8 MP file intact on disk.
-            preview_bio = None
-            try:
-                with Image.open(image_file) as img:
-                    if img.mode != "RGB":
-                        img = img.convert("RGB")
-                    orig_w, orig_h = img.size
-                    max_preview = 1920
-                    if max(orig_w, orig_h) > max_preview:
-                        sc = max_preview / max(orig_w, orig_h)
-                        nw = max(1, int(orig_w * sc))
-                        nh = max(1, int(orig_h * sc))
-                        img = img.resize((nw, nh), Image.Resampling.LANCZOS)
-                    preview_bio = io.BytesIO()
-                    preview_bio.name = image_file.name
-                    img.save(preview_bio, format="JPEG", quality=88, optimize=True)
-                    preview_bio.seek(0)
-            except Exception as prep_err:
-                logger.warning("Gagal membuat preview buffer gambar untuk review: %s. Menggunakan berkas asli.", prep_err)
-                preview_bio = None
+            # Prepare an optimized preview buffer for Telegram reply_photo non-blockingly
+            preview_bio = await asyncio.to_thread(_generate_preview_jpeg_buffer, image_file)
 
             try:
                 if preview_bio:
@@ -957,21 +963,16 @@ async def review_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
             except Exception:
                 pass
-        try:
-            await query.answer("🔄 Memulai proses regenerasi gambar...", show_alert=False)
-        except Exception:
-            pass
+        await safe_answer_callback(query, "🔄 Memulai proses regenerasi gambar...", show_alert=False)
     else:
-        try:
-            await query.answer()
-        except Exception:
-            pass
+        await safe_answer_callback(query)
 
     service = get_review_service()
 
     # 1. Validate callback token TTL
     if not service.validate_token(token):
-        await query.answer(
+        await safe_answer_callback(
+            query,
             "⏳ Sesi review ini telah kedaluwarsa (TTL habis). Silakan ketik /review lagi.",
             show_alert=True,
         )
@@ -991,12 +992,12 @@ async def review_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     # 2. Full-resolution image request
     if action == "res":
-        asset = service.get_pending_asset(asset_id=asset_id)
+        asset = await asyncio.to_thread(service.get_pending_asset, asset_id=asset_id)
         if not asset or not asset.raw_path or not Path(asset.raw_path).is_file():
-            await query.answer("File resolusi penuh tidak ditemukan di server.", show_alert=True)
+            await safe_answer_callback(query, "File resolusi penuh tidak ditemukan di server.", show_alert=True)
             return
 
-        await query.answer("Mengirimkan file gambar resolusi penuh...")
+        await safe_answer_callback(query, "Mengirimkan file gambar resolusi penuh...")
         try:
             with open(asset.raw_path, "rb") as f:
                 await msg.reply_document(
@@ -1009,8 +1010,9 @@ async def review_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await msg.reply_text(f"Gagal mengirim file full-res: {e}")
         return
 
-    # 3. Process review decision (approve, reject, regenerate)
-    res = service.process_review_action(
+    # 3. Process review decision (approve, reject, regenerate) outside event loop
+    res = await asyncio.to_thread(
+        service.process_review_action,
         asset_id=asset_id,
         action=action,
         telegram_user_id=user_id,
@@ -1020,7 +1022,8 @@ async def review_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     if not res.success:
         if res.already_completed:
             # Double click or repeated click
-            await query.answer(
+            await safe_answer_callback(
+                query,
                 f"⚠️ Aksi diabaikan: {res.message}",
                 show_alert=True,
             )
@@ -1030,7 +1033,7 @@ async def review_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             except Exception:
                 pass
         else:
-            await query.answer(f"Gagal: {res.message}", show_alert=True)
+            await safe_answer_callback(query, f"Gagal: {res.message}", show_alert=True)
         return
 
     # Successful state transition

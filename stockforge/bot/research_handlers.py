@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from stockforge.bot.auth import require_admin
+from stockforge.bot.lifecycle import safe_answer_callback
 from stockforge.db.models import (
     Concept,
     Niche,
@@ -290,7 +291,7 @@ async def research_callback_handler(
     action = parts[1] if len(parts) > 1 else ""
     user_tg_id = update.effective_user.id if update.effective_user else 0
 
-    await query.answer()
+    await safe_answer_callback(query)
 
     with session_factory() as session:
         user_db_id = _get_admin_db_user_id(session, user_tg_id)
@@ -373,7 +374,7 @@ async def research_callback_handler(
             ).all()
 
             if not selected_rows:
-                await query.answer("Pilih minimal 1 niche sebelum meninjau rencana!", show_alert=True)
+                await safe_answer_callback(query, "Pilih minimal 1 niche sebelum meninjau rencana!", show_alert=True)
                 return
 
             selected_niches = [c.niche_name for c in selected_rows]

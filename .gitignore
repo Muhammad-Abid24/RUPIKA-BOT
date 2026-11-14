@@ -35,5 +35,3 @@ __pycache__/
 build/
 dist/
 *.egg-info/
-test/
-tests/

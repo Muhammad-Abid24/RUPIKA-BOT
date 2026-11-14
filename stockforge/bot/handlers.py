@@ -1,6 +1,7 @@
 """Telegram command handlers and menu keyboards for RUPIKA (SF-003)."""
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 from pathlib import Path
@@ -125,12 +126,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
 
 
-@require_admin
-async def health_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /health command running diagnostics on database and file storage."""
-    settings = get_settings()
-
-    # 1. Database integrity
+def _run_health_diagnostics(settings) -> tuple[str, str]:
     db_status = "OK"
     try:
         engine = create_db_engine(settings.database_url)
@@ -140,7 +136,6 @@ async def health_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as e:
         db_status = f"Gagal: {e}"
 
-    # 2. Storage write access
     storage_status = "OK"
     data_path = Path(settings.data_dir).resolve()
     try:
@@ -150,6 +145,16 @@ async def health_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         test_file.unlink()
     except Exception as e:
         storage_status = f"Tidak dapat menulis: {e}"
+
+    return db_status, storage_status
+
+
+@require_admin
+async def health_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /health command running diagnostics non-blockingly on database and storage."""
+    settings = get_settings()
+
+    db_status, storage_status = await asyncio.to_thread(_run_health_diagnostics, settings)
 
     text = (
         "🩺 **Status Kesehatan Sistem RUPIKA**\n\n"

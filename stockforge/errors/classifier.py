@@ -50,20 +50,41 @@ class ErrorClassifier:
         exception: Optional[Exception] = None,
     ) -> NormalizedProviderError:
         """Classify HTTP status, response body, headers, or Python exception into NormalizedProviderError."""
+        if isinstance(http_status, Exception):
+            if exception is None:
+                exception = http_status
+            http_status = None
+
+        if isinstance(exception, NormalizedProviderError):
+            if provider and (not exception.provider or exception.provider == "generic"):
+                exception.provider = provider
+            if model and not exception.model:
+                exception.model = model
+            return exception
+
         status = http_status
         content_body = body
         req_headers = headers
 
         # Extract information from common exception types if provided
         if exception is not None:
-            # Check for HTTP status attributes
+            resp_obj = getattr(exception, "response", None)
+
+            # Check for HTTP status attributes (direct or from response)
             if status is None:
-                status = getattr(exception, "status_code", None) or getattr(exception, "status", None)
+                if resp_obj is not None and hasattr(resp_obj, "status_code"):
+                    status = resp_obj.status_code
+                else:
+                    status = getattr(exception, "status_code", None) or getattr(exception, "status", None)
             
-            # Check for headers
-            exc_headers = getattr(exception, "headers", None)
-            if req_headers is None and isinstance(exc_headers, dict):
-                req_headers = dict(exc_headers)
+            # Check for headers (direct or from response)
+            if req_headers is None:
+                if resp_obj is not None and hasattr(resp_obj, "headers"):
+                    req_headers = dict(resp_obj.headers)
+                else:
+                    exc_headers = getattr(exception, "headers", None)
+                    if isinstance(exc_headers, (dict, list)):
+                        req_headers = dict(exc_headers)
 
             # Check for response body or message
             if content_body is None:

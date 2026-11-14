@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from stockforge.bot.auth import require_admin
+from stockforge.bot.lifecycle import safe_answer_callback
 from stockforge.bot.progress import format_progress_message
 from stockforge.db.models import Job, JobItem
 from stockforge.providers.health import ProviderHealthTracker, default_health_tracker
@@ -271,7 +272,7 @@ async def retry_callback_handler(
     if not query or not query.data:
         return
 
-    await query.answer()
+    await safe_answer_callback(query)
     data = query.data
 
     if data.startswith("retry_cancel:"):

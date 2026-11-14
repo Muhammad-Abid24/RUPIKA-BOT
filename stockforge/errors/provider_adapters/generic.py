@@ -62,6 +62,9 @@ class GenericErrorAdapter(BaseProviderErrorAdapter):
         elif "budget exceeded" in low_msg or "daily budget" in low_msg or "monthly budget" in low_msg:
             code = ErrorCode.BUDGET_EXCEEDED
             user_msg = "Budget limit reached; generation suspended."
+        elif "timed out" in low_msg or "timeout" in low_msg or "time out" in low_msg:
+            code = ErrorCode.REQUEST_TIMEOUT
+            user_msg = f"Request to {provider} timed out."
         elif "download failed" in low_msg or "failed to download" in low_msg or "image corrupt" in low_msg:
             code = ErrorCode.IMAGE_DOWNLOAD_FAILED
             user_msg = "Image artifact download from provider failed."

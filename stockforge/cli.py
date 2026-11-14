@@ -209,6 +209,117 @@ def doctor() -> None:
     console.print("[bold green]Pemeriksaan RUPIKA Doctor selesai. Semua konfigurasi dasar dan invarian valid.[/bold green]")
 
 
+@app.command(name="health")
+def health_cli(
+    service: str = typer.Option(
+        "system",
+        "--service",
+        "-s",
+        help="Service to check: 'bot', 'worker', or 'system'",
+    ),
+    max_age_seconds: float = typer.Option(
+        45.0,
+        "--max-age",
+        help="Maximum allowed age of heartbeat file in seconds before declaring unhealthy",
+    ),
+) -> None:
+    """Runtime health check for Docker container liveness, readiness, and polling watchdog probes."""
+    import json
+    from datetime import datetime, timezone
+    from stockforge.bot.lifecycle import BOT_HEARTBEAT_FILE, WORKER_HEARTBEAT_FILE
+    from stockforge.db.session import create_db_engine
+    from stockforge.config import get_settings
+
+    settings = get_settings()
+
+    def check_db() -> bool:
+        try:
+            engine = create_db_engine(settings.database_url)
+            with engine.connect() as conn:
+                from sqlalchemy import text
+                res = conn.execute(text("SELECT 1")).scalar()
+                return res == 1
+        except Exception:
+            return False
+
+    now = datetime.now(timezone.utc)
+
+    if service == "bot":
+        hb_path = Path(BOT_HEARTBEAT_FILE)
+        if not hb_path.exists():
+            console.print("[bold red]UNHEALTHY: Bot heartbeat file tidak ditemukan.[/bold red]")
+            raise typer.Exit(code=1)
+        try:
+            data = json.loads(hb_path.read_text(encoding="utf-8"))
+            ts_str = data.get("timestamp")
+            if not ts_str:
+                raise ValueError("Missing timestamp in heartbeat")
+            ts = datetime.fromisoformat(ts_str)
+            age = (now - ts).total_seconds()
+            status = data.get("status", "unknown")
+            if status != "healthy":
+                console.print(f"[bold red]UNHEALTHY: Bot melaporkan status '{status}' (bukan healthy).[/bold red]")
+                raise typer.Exit(code=1)
+            if age > max_age_seconds:
+                console.print(
+                    f"[bold red]UNHEALTHY: Bot heartbeat stale ({age:.1f}s > {max_age_seconds}s). Polling mungkin macet.[/bold red]"
+                )
+                raise typer.Exit(code=1)
+        except typer.Exit:
+            raise
+        except Exception as e:
+            console.print(f"[bold red]UNHEALTHY: Gagal membaca bot heartbeat: {e}[/bold red]")
+            raise typer.Exit(code=1)
+
+        if not check_db():
+            console.print("[bold red]UNHEALTHY: Koneksi basis data SQLite gagal.[/bold red]")
+            raise typer.Exit(code=1)
+
+        console.print("[bold green]✓ HEALTHY: Bot polling aktif dan terhubung.[/bold green]")
+        return
+
+    elif service == "worker":
+        hb_path = Path(WORKER_HEARTBEAT_FILE)
+        if not hb_path.exists():
+            console.print("[bold red]UNHEALTHY: Worker heartbeat file tidak ditemukan.[/bold red]")
+            raise typer.Exit(code=1)
+        try:
+            data = json.loads(hb_path.read_text(encoding="utf-8"))
+            ts_str = data.get("timestamp")
+            if not ts_str:
+                raise ValueError("Missing timestamp in heartbeat")
+            ts = datetime.fromisoformat(ts_str)
+            age = (now - ts).total_seconds()
+            status = data.get("status", "unknown")
+            if status not in ("running", "idle"):
+                console.print(f"[bold red]UNHEALTHY: Worker melaporkan status '{status}'.[/bold red]")
+                raise typer.Exit(code=1)
+            if age > max_age_seconds:
+                console.print(
+                    f"[bold red]UNHEALTHY: Worker heartbeat stale ({age:.1f}s > {max_age_seconds}s).[/bold red]"
+                )
+                raise typer.Exit(code=1)
+        except typer.Exit:
+            raise
+        except Exception as e:
+            console.print(f"[bold red]UNHEALTHY: Gagal membaca worker heartbeat: {e}[/bold red]")
+            raise typer.Exit(code=1)
+
+        if not check_db():
+            console.print("[bold red]UNHEALTHY: Koneksi basis data SQLite gagal.[/bold red]")
+            raise typer.Exit(code=1)
+
+        console.print("[bold green]✓ HEALTHY: Worker loop aktif dan sehat.[/bold green]")
+        return
+
+    else:
+        # system check
+        if not check_db():
+            console.print("[bold red]UNHEALTHY: Basis data tidak dapat diakses.[/bold red]")
+            raise typer.Exit(code=1)
+        console.print("[bold green]✓ HEALTHY: Sistem dasar siap.[/bold green]")
+
+
 @app.command(name="bot")
 def bot_command(
     token: Optional[str] = typer.Option(

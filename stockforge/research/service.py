@@ -95,6 +95,12 @@ class ResearchService:
 
         provider_instance = getattr(self.router.registry, "_provider_instances", {}).get(model_reg.provider_name)
         if provider_instance is None:
+            from stockforge.config import get_settings
+            if get_settings().app_env == "production":
+                raise RuntimeError(
+                    f"FATAL: Provider '{model_reg.provider_name}' tidak memiliki instance aktif terdaftar di lingkungan produksi. "
+                    "Penggunaan mock provider dilarang keras pada production."
+                )
             from stockforge.providers.mock import MockTextProvider
             provider_instance = MockTextProvider(provider_name=model_reg.provider_name)
 

@@ -3,18 +3,72 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 import uuid
 from typing import Any, Callable, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from stockforge.bot.lifecycle import remove_worker_heartbeat, touch_worker_heartbeat
 from stockforge.db.models import Job, JobItem, utc_now
 from stockforge.providers.resilience import AmbiguousTimeoutError
 from stockforge.queue.service import QueueService
 from stockforge.queue.tracker import ItemProgressTracker
 
 logger = logging.getLogger("stockforge.queue.worker")
+
+
+class BackgroundHeartbeat:
+    """Periodically renews job lease and writes worker heartbeat file in background thread."""
+
+    def __init__(
+        self,
+        queue_service: QueueService,
+        job_id: int,
+        worker_id: str,
+        interval: float = 15.0,
+        lease_seconds: int = 60,
+    ) -> None:
+        self.queue_service = queue_service
+        self.job_id = job_id
+        self.worker_id = worker_id
+        self.interval = interval
+        self.lease_seconds = lease_seconds
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name=f"worker-heartbeat-{self.job_id}",
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.interval):
+            try:
+                renewed = self.queue_service.heartbeat(
+                    self.job_id,
+                    self.worker_id,
+                    extend_seconds=self.lease_seconds,
+                )
+                touch_worker_heartbeat(status="running", job_id=self.job_id)
+                if not renewed:
+                    logger.warning(
+                        "Gagal memperbarui lease job %s untuk worker %s (mungkin dibatalkan)",
+                        self.job_id,
+                        self.worker_id,
+                    )
+            except Exception as e:
+                logger.error("Galat pada background lease heartbeat: %s", e)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
 
 
 class Worker:
@@ -479,53 +533,64 @@ class Worker:
         # Plan which items need execution (excluding completed ones!)
         indices_to_run = tracker.prepare_resumption_plan(job_id)
 
-        any_failure = False
-        for idx in indices_to_run:
-            # Check cancellation before starting next item
-            if self.check_is_cancelled(job_id):
-                logger.info("Pekerjaan %s dibatalkan secara kooperatif oleh operator", job_id)
-                tracker.update_item_stage(job_id, idx, stage="generating", status="cancelled")
-                return "cancelled"
+        heartbeat = BackgroundHeartbeat(
+            self.queue_service,
+            job_id,
+            self.worker_id,
+            interval=min(15.0, max(2.0, self.lease_seconds / 3.0)),
+            lease_seconds=self.lease_seconds,
+        )
+        heartbeat.start()
 
-            # Heartbeat to extend lease
-            self.queue_service.heartbeat(job_id, self.worker_id, extend_seconds=self.lease_seconds)
+        try:
+            for idx in indices_to_run:
+                # Check cancellation before starting next item
+                if self.check_is_cancelled(job_id):
+                    logger.info("Pekerjaan %s dibatalkan secara kooperatif oleh operator", job_id)
+                    tracker.update_item_stage(job_id, idx, stage="generating", status="cancelled")
+                    return "cancelled"
 
-            # Persist stage update BEFORE external execution
-            tracker.update_item_stage(job_id, idx, stage="generating", status="processing")
-            self._publish_progress(job_id, force=True)
-            self._send_telegram_typing_action()
+                # Heartbeat to extend lease
+                self.queue_service.heartbeat(job_id, self.worker_id, extend_seconds=self.lease_seconds)
 
-            try:
-                # Network / processing happens outside database transaction!
-                asset_id = None
-                if item_processor:
-                    asset_id = item_processor(job_id, idx)
-                else:
-                    asset_id = self._default_pipeline_item_processor(job_id, idx)
-
-                # Persist stage update AFTER successful execution
-                tracker.update_item_stage(job_id, idx, stage="generating", status="completed", asset_id=asset_id)
+                # Persist stage update BEFORE external execution
+                tracker.update_item_stage(job_id, idx, stage="generating", status="processing")
                 self._publish_progress(job_id, force=True)
-            except AmbiguousTimeoutError as ate:
-                logger.warning("Item %s pada job %s mengalami ambiguous timeout: %s", idx, job_id, ate)
-                tracker.update_item_stage(
-                    job_id,
-                    idx,
-                    stage="generating",
-                    status="needs_reconciliation",
-                    last_error=str(ate),
-                )
-                self._send_telegram_failure_alert(job_id, idx, "generating", str(ate))
-            except Exception as e:
-                logger.error("Gagal memproses item %s pada job %s: %s", idx, job_id, e)
-                tracker.update_item_stage(
-                    job_id,
-                    idx,
-                    stage="generating",
-                    status="failed",
-                    last_error=str(e),
-                )
-                self._send_telegram_failure_alert(job_id, idx, "generating", str(e))
+                self._send_telegram_typing_action()
+
+                try:
+                    # Network / processing happens outside database transaction!
+                    asset_id = None
+                    if item_processor:
+                        asset_id = item_processor(job_id, idx)
+                    else:
+                        asset_id = self._default_pipeline_item_processor(job_id, idx)
+
+                    # Persist stage update AFTER successful execution
+                    tracker.update_item_stage(job_id, idx, stage="generating", status="completed", asset_id=asset_id)
+                    self._publish_progress(job_id, force=True)
+                except AmbiguousTimeoutError as ate:
+                    logger.warning("Item %s pada job %s mengalami ambiguous timeout: %s", idx, job_id, ate)
+                    tracker.update_item_stage(
+                        job_id,
+                        idx,
+                        stage="generating",
+                        status="needs_reconciliation",
+                        last_error=str(ate),
+                    )
+                    self._send_telegram_failure_alert(job_id, idx, "generating", str(ate))
+                except Exception as e:
+                    logger.error("Gagal memproses item %s pada job %s: %s", idx, job_id, e)
+                    tracker.update_item_stage(
+                        job_id,
+                        idx,
+                        stage="generating",
+                        status="failed",
+                        last_error=str(e),
+                    )
+                    self._send_telegram_failure_alert(job_id, idx, "generating", str(e))
+        finally:
+            heartbeat.stop()
 
         progress = tracker.get_batch_progress(job_id)
         self._publish_progress(job_id, force=True, notify_completion=False)
@@ -570,17 +635,35 @@ class Worker:
         return job_id
 
     def run(self) -> None:
-        """Start worker loop polling the queue until stopped."""
+        """Start worker loop polling the queue until stopped, sweeping stale jobs on startup."""
         self.is_running = True
         logger.info("Worker %s aktif dan memantau antrean...", self.worker_id)
-        while self.is_running:
-            try:
-                claimed = self.run_once()
-                if not claimed:
+
+        # 1. Automatic crash-recovery sweep on worker boot
+        try:
+            recovered = self.queue_service.recover_stale_jobs()
+            if recovered:
+                logger.warning(
+                    "Worker startup sweep memulihkan %d pekerjaan terlantar / kadaluarsa: %s",
+                    len(recovered),
+                    recovered,
+                )
+        except Exception as rec_err:
+            logger.error("Gagal menjalankan startup recovery sweep: %s", rec_err)
+
+        try:
+            while self.is_running:
+                try:
+                    claimed = self.run_once()
+                    if not claimed:
+                        touch_worker_heartbeat(status="idle")
+                        time.sleep(self.poll_interval)
+                except Exception as e:
+                    logger.error("Galat pada loop worker %s: %s", self.worker_id, e)
+                    touch_worker_heartbeat(status="error")
                     time.sleep(self.poll_interval)
-            except Exception as e:
-                logger.error("Galat pada loop worker %s: %s", self.worker_id, e)
-                time.sleep(self.poll_interval)
+        finally:
+            remove_worker_heartbeat()
 
     def stop(self) -> None:
         """Signal worker to stop after current job finishes."""
