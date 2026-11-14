@@ -5,7 +5,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
-from sqlalchemy import Engine, select, text
+from sqlalchemy import Engine, func, select, text
 from sqlalchemy.orm import Session
 
 from stockforge.db.models import Job, JobAttempt, JobEvent, TelegramOutbox, utc_now
@@ -266,4 +266,89 @@ class QueueService:
             session.commit()
             session.refresh(outbox_entry)
             return outbox_entry
+
+    def get_active_running_job(self) -> Optional[Job]:
+        """Retrieve currently active running/leased job if worker is busy."""
+        now = utc_now()
+        with Session(self.engine) as session:
+            stmt = (
+                select(Job)
+                .where(
+                    Job.status.in_(["running", "reserved"]),
+                    Job.lease_until.is_not(None),
+                    Job.lease_until > now,
+                )
+                .order_by(Job.id.desc())
+                .limit(1)
+            )
+            job = session.scalars(stmt).first()
+            if job:
+                session.expunge(job)
+            return job
+
+    def get_queue_position(self, job_id: int) -> int:
+        """Calculate queue position of a pending job (1-based index)."""
+        with Session(self.engine) as session:
+            pending_ahead = session.scalar(
+                select(func.count(Job.id)).where(
+                    Job.status == "pending",
+                    Job.id < job_id,
+                )
+            ) or 0
+            now = utc_now()
+            has_running = session.scalar(
+                select(Job.id).where(
+                    Job.status.in_(["running", "reserved"]),
+                    Job.lease_until.is_not(None),
+                    Job.lease_until > now,
+                ).limit(1)
+            )
+            return pending_ahead + (1 if has_running else 0) + 1
+
+    def get_queue_summary(self) -> Dict[str, Any]:
+        """Provide real-time operational status of queue and worker."""
+        now = utc_now()
+        with Session(self.engine) as session:
+            running_job = session.scalars(
+                select(Job)
+                .where(
+                    Job.status.in_(["running", "reserved"]),
+                    Job.lease_until.is_not(None),
+                    Job.lease_until > now,
+                )
+                .order_by(Job.id.desc())
+                .limit(1)
+            ).first()
+
+            pending_count = session.scalar(
+                select(func.count(Job.id)).where(Job.status == "pending")
+            ) or 0
+
+            return {
+                "is_busy": running_job is not None,
+                "running_job_id": running_job.id if running_job else None,
+                "running_job_type": running_job.type if running_job else None,
+                "pending_count": pending_count,
+            }
+
+    def get_running_job_item_detail(self, job_id: int) -> Optional[Dict[str, Any]]:
+        """Get current executing item and stage for an active running job."""
+        from stockforge.db.models import JobItem
+        with Session(self.engine) as session:
+            curr_item = session.scalars(
+                select(JobItem)
+                .where(JobItem.job_id == job_id, JobItem.status == "processing")
+                .order_by(JobItem.item_index.asc())
+                .limit(1)
+            ).first()
+            total_items = session.scalar(
+                select(func.count(JobItem.id)).where(JobItem.job_id == job_id)
+            ) or 1
+            if curr_item:
+                return {
+                    "item_index": curr_item.item_index,
+                    "total_items": total_items,
+                    "stage": curr_item.stage,
+                }
+            return None
 

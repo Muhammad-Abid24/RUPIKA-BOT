@@ -619,6 +619,10 @@ class Worker:
         self.current_job_id = job_id
         logger.info("Worker %s memulai pemrosesan job %s (%s)", self.worker_id, job_id, job.type)
 
+        # Immediately send typing indicator and publish initial progress so Telegram user sees realtime pickup
+        self._send_telegram_typing_action()
+        self._publish_progress(job_id, force=True)
+
         final_status = "failed"
         try:
             final_status = self.execute_job_items(job_id, item_processor=item_processor)

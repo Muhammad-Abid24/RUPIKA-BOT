@@ -1077,15 +1077,45 @@ async def review_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         from stockforge.providers.pricing import get_active_image_model, resolve_image_unit_cost_usd
         active_model = get_active_image_model()
         cost_usd = resolve_image_unit_cost_usd(active_model)
+
+        # Check if worker is currently busy with another job
+        active_info = None
+        if service.queue_service:
+            running_job = service.queue_service.get_active_running_job()
+            if running_job and running_job.id != res.new_job_id:
+                queue_pos = service.queue_service.get_queue_position(res.new_job_id)
+                detail = service.queue_service.get_running_job_item_detail(running_job.id)
+                detail_str = (
+                    f"Gambar #{detail['item_index']}/{detail['total_items']} (Tahap: {detail['stage'].upper()})"
+                    if detail
+                    else f"Tipe: {running_job.type}"
+                )
+                active_info = {
+                    "running_job_id": running_job.id,
+                    "running_detail": detail_str,
+                    "queue_pos": queue_pos,
+                }
+
         try:
-            regen_text = (
-                f"🔄 <b>Proses Regenerasi Dimulai untuk Aset #{asset_id}</b>\n\n"
-                f"• <b>Job Baru:</b> Batch #{res.new_job_id}\n"
-                f"• <b>Model:</b> <code>{html.escape(active_model)}</code>\n"
-                f"• <b>Estimasi Biaya:</b> <code>${cost_usd:.3f} USD</code>\n"
-                f"• <b>Status:</b> Antrean produksi gambar baru (sedang diproses)...\n\n"
-                f"💡 <i>Gunakan perintah <code>/status {res.new_job_id}</code> untuk memantau kemajuan atau tunggu notifikasi saat gambar selesai dibuat.</i>"
-            )
+            if active_info:
+                regen_text = (
+                    f"⏳ <b>Worker Sedang Sibuk Mengerjakan Task Lain!</b>\n\n"
+                    f"• <b>Task Sedang Berjalan:</b> Batch #{active_info['running_job_id']} (<code>{html.escape(active_info['running_detail'])}</code>)\n"
+                    f"• <b>Permintaan Regenerasi:</b> <code>Batch #{res.new_job_id}</code> (Aset #{asset_id})\n"
+                    f"• <b>Posisi Antrean:</b> Antrean ke-{active_info['queue_pos']} (Status: <code>PENDING</code>)\n"
+                    f"• <b>Model:</b> <code>{html.escape(active_model)}</code>\n"
+                    f"• <b>Estimasi Biaya:</b> <code>${cost_usd:.3f} USD</code>\n\n"
+                    f"💡 <i>Permintaan regenerasi Anda telah aman dimasukkan ke dalam antrean (Queue). Mohon menunggu sebentar, worker akan otomatis memproses regenerasi ini segera setelah Batch #{active_info['running_job_id']} selesai. Bot tetap responsif dan realtime!</i>"
+                )
+            else:
+                regen_text = (
+                    f"🔄 <b>Proses Regenerasi Langsung Dimulai untuk Aset #{asset_id}</b>\n\n"
+                    f"• <b>Job Baru:</b> Batch #{res.new_job_id}\n"
+                    f"• <b>Model:</b> <code>{html.escape(active_model)}</code>\n"
+                    f"• <b>Estimasi Biaya:</b> <code>${cost_usd:.3f} USD</code>\n"
+                    f"• <b>Status:</b> Antrean produksi gambar baru (sedang diproses)...\n\n"
+                    f"💡 <i>Gunakan perintah <code>/status {res.new_job_id}</code> untuk memantau kemajuan atau tunggu notifikasi saat gambar selesai dibuat.</i>"
+                )
             await msg.reply_text(regen_text, parse_mode=ParseMode.HTML)
         except Exception as rx:
             logger.warning("Gagal mengirim pesan konfirmasi regenerasi: %s", rx)

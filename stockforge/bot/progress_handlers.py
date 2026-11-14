@@ -54,16 +54,35 @@ async def status_command(
     tracker = ItemProgressTracker(session_factory)
     progress = tracker.get_batch_progress(job_id)
 
+    queue_note = ""
     with session_factory() as session:
         job = session.get(Job, job_id)
         job_type = job.type if job else "image_batch"
         cost_cents = job.reserved_usd_cents if job else 0
 
+        if job and job.status == "pending":
+            from stockforge.db.models import utc_now
+            now = utc_now()
+            running_other = session.scalars(
+                select(Job).where(
+                    Job.status.in_(["running", "reserved"]),
+                    Job.id != job_id,
+                    Job.lease_until.is_not(None),
+                    Job.lease_until > now,
+                ).limit(1)
+            ).first()
+            if running_other:
+                queue_note = (
+                    f"\n\n⏳ <b>Status Antrean:</b> Task ini sedang menunggu giliran (<code>PENDING</code>) "
+                    f"karena worker saat ini sedang memproses <b>Batch #{running_other.id}</b>. "
+                    f"Task akan otomatis dieksekusi secara realtime begitu batch aktif selesai."
+                )
+
     text = format_progress_message(
         summary=progress,
         job_type=job_type,
         estimated_cost_cents=cost_cents,
-    )
+    ) + queue_note
 
     if update.effective_message:
         sent = await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -169,11 +188,28 @@ async def jobs_command(
                     )
                 return
 
-            active_count = sum(1 for j in jobs if j.status in ("running", "reserved", "pending"))
+            running_job = next((j for j in jobs if j.status in ("running", "reserved")), None)
+            pending_jobs = [j for j in jobs if j.status == "pending"]
+
+            if running_job:
+                curr_item = next((it for it in (running_job.items or []) if it.status == "processing"), None)
+                tot = len(running_job.items) if running_job.items else 1
+                curr_str = f"Gambar #{curr_item.item_index}/{tot} ({curr_item.stage.upper()})" if curr_item else "Aktif berjalan"
+                worker_status_header = (
+                    f"⚙️ <b>Status Worker:</b> ⏳ <b>SIBUK (BUSY)</b>\n"
+                    f"   └ Sedang memproses: <b>Batch #{running_job.id}</b> ({curr_str})\n"
+                    f"   └ Menunggu giliran: <b>{len(pending_jobs)}</b> task dalam antrean\n"
+                )
+            else:
+                worker_status_header = (
+                    "⚙️ <b>Status Worker:</b> 🟢 <b>STANDBY (IDLE)</b>\n"
+                    "   └ Siap menerima dan memproses task baru secara instan\n"
+                )
 
             lines = [
-                "📋 <b>Daftar Pekerjaan & Antrean Batch</b>",
-                f"<i>Menampilkan {len(jobs)} batch terakhir ({active_count} aktif)</i>\n",
+                "📋 <b>Daftar Pekerjaan & Antrean Batch</b>\n",
+                worker_status_header,
+                f"<i>Riwayat {len(jobs)} batch terakhir:</i>",
             ]
 
             for j in jobs:
@@ -183,8 +219,14 @@ async def jobs_command(
                 completed_items = sum(1 for it in j.items if it.status == "completed") if j.items else (1 if j.status == "completed" else 0)
                 failed_items = sum(1 for it in j.items if it.status == "failed") if j.items else (1 if j.status == "failed" else 0)
 
+                status_tag = ""
+                if j.status == "running":
+                    status_tag = " — <b>[SEDANG BERJALAN]</b>"
+                elif j.status == "pending":
+                    status_tag = " — <b>[DALAM ANTREAN]</b>"
+
                 line = (
-                    f"{icon} <b>Batch #{j.id}</b> (<code>{html.escape(j.type)}</code>)\n"
+                    f"{icon} <b>Batch #{j.id}</b> (<code>{html.escape(j.type)}</code>){status_tag}\n"
                     f"   └ Status: <code>{html.escape(j.status.upper())}</code> | "
                     f"Item: {completed_items}/{total_items} sukses"
                 )

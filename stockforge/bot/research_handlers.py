@@ -481,15 +481,47 @@ async def research_callback_handler(
                 actor_telegram_id=user_tg_id,
                 expected_plan_hash=actual_hash,
             )
-            await query.edit_message_text(
-                f"🚀 <b>Produksi Berhasil Diotorisasi & Dijadwalkan!</b>\n\n"
-                f"• <b>Job ID:</b> <code>#{job.id}</code> (Tipe: <code>{job.type}</code>)\n"
-                f"• <b>Jumlah Gambar:</b> {plan.image_count}\n"
-                f"• <b>Status Antrean:</b> <code>pending</code> (Worker siap memproses)\n"
-                f"• <b>Penyetuju:</b> Telegram Admin #{user_tg_id}\n\n"
-                f"Gunakan <code>/status {job.id}</code> untuk memantau progres produksi secara live.",
-                parse_mode=ParseMode.HTML,
-            )
+
+            # Check if worker is currently busy with another job
+            active_info = None
+            if queue_service:
+                running_job = queue_service.get_active_running_job()
+                if running_job and running_job.id != job.id:
+                    detail = queue_service.get_running_job_item_detail(running_job.id)
+                    pos = queue_service.get_queue_position(job.id)
+                    detail_str = (
+                        f"Gambar #{detail['item_index']}/{detail['total_items']} (Tahap: {detail['stage'].upper()})"
+                        if detail
+                        else f"Tipe: {running_job.type}"
+                    )
+                    active_info = {
+                        "running_job_id": running_job.id,
+                        "running_detail": detail_str,
+                        "queue_pos": pos,
+                    }
+
+            if active_info:
+                text_response = (
+                    f"⏳ <b>Worker Sedang Sibuk Mengerjakan Task Lain!</b>\n\n"
+                    f"• <b>Task Sedang Berjalan:</b> Batch #{active_info['running_job_id']} (<code>{html.escape(active_info['running_detail'])}</code>)\n"
+                    f"• <b>Task Baru Anda:</b> <code>Batch #{job.id}</code> (Tipe: <code>{job.type}</code>)\n"
+                    f"• <b>Jumlah Gambar:</b> {plan.image_count}\n"
+                    f"• <b>Status Antrean:</b> <code>PENDING</code> (Antrean ke-{active_info['queue_pos']})\n"
+                    f"• <b>Penyetuju:</b> Telegram Admin #{user_tg_id}\n\n"
+                    f"💡 <i>Permintaan produksi Anda telah tersimpan dengan aman di antrean (Queue). Mohon menunggu sebentar, worker akan otomatis mengeksekusi Batch #{job.id} segera setelah Batch #{active_info['running_job_id']} selesai. Bot tetap responsif dan realtime!</i>\n\n"
+                    f"Gunakan <code>/jobs</code> untuk melihat urutan antrean atau <code>/status {job.id}</code>."
+                )
+            else:
+                text_response = (
+                    f"🚀 <b>Produksi Berhasil Diotorisasi & Memulai Pemrosesan!</b>\n\n"
+                    f"• <b>Job ID:</b> <code>#{job.id}</code> (Tipe: <code>{job.type}</code>)\n"
+                    f"• <b>Jumlah Gambar:</b> {plan.image_count}\n"
+                    f"• <b>Status Antrean:</b> <code>pending</code> (Worker langsung memproses)\n"
+                    f"• <b>Penyetuju:</b> Telegram Admin #{user_tg_id}\n\n"
+                    f"Gunakan <code>/status {job.id}</code> untuk memantau progres produksi secara live."
+                )
+
+            await query.edit_message_text(text_response, parse_mode=ParseMode.HTML)
         except PlanAlreadyConsumedError:
             await query.edit_message_text("⚠️ Rencana produksi sudah pernah dikonsumsi.")
         except Exception as e:

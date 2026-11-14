@@ -26,6 +26,7 @@ services:
     volumes:
       - stockforge_data:/data
       - ./config:/app/config:ro
+      - ./.env:/app/.env:ro
     networks:
       - rupika_internal
     healthcheck:
@@ -59,6 +60,7 @@ services:
     volumes:
       - stockforge_data:/data
       - ./config:/app/config:ro
+      - ./.env:/app/.env:ro
     networks:
       - rupika_internal
     depends_on:
@@ -99,6 +101,7 @@ services:
     volumes:
       - stockforge_data:/data
       - ./config:/app/config:ro
+      - ./.env:/app/.env:ro
     networks:
       - rupika_internal
 
