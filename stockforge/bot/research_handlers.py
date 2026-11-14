@@ -55,7 +55,7 @@ async def continuous_typing(chat: Optional[Any], bot: Optional[Any], interval: f
                 pass
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval)
-            except (asyncio.TimeoutError, TimeoutError):
+            except TimeoutError:
                 pass
 
     task = asyncio.create_task(_heartbeat())
@@ -503,7 +503,7 @@ async def research_callback_handler(
             if active_info:
                 text_response = (
                     f"⏳ <b>Worker Sedang Sibuk Mengerjakan Task Lain!</b>\n\n"
-                    f"• <b>Task Sedang Berjalan:</b> Batch #{active_info['running_job_id']} (<code>{html.escape(active_info['running_detail'])}</code>)\n"
+                    f"• <b>Task Sedang Berjalan:</b> Batch #{active_info['running_job_id']} (<code>{html.escape(str(active_info['running_detail']))}</code>)\n"
                     f"• <b>Task Baru Anda:</b> <code>Batch #{job.id}</code> (Tipe: <code>{job.type}</code>)\n"
                     f"• <b>Jumlah Gambar:</b> {plan.image_count}\n"
                     f"• <b>Status Antrean:</b> <code>PENDING</code> (Antrean ke-{active_info['queue_pos']})\n"
